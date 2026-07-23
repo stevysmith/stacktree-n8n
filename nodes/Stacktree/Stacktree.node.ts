@@ -9,6 +9,53 @@ import type {
 	JsonObject,
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { randomBytes } from 'node:crypto';
+
+// Multipart upload for publish/update. Built as a raw Buffer body so it goes
+// through the modern httpRequest helper: n8n strips source comments at build
+// time, so a legacy `this.helpers.request` call cannot be lint-suppressed in the
+// published dist (the community-package scanner lints the compiled .js and
+// re-flags it). Sending a hand-built multipart body avoids the deprecated helper
+// entirely. `authed` picks httpRequestWithAuthentication (credential injects the
+// Bearer) vs httpRequest (anonymous publish).
+async function multipartRequest(
+	ctx: IExecuteFunctions,
+	method: IHttpRequestMethods,
+	url: string,
+	file: { filename: string; contentType: string; buffer: Buffer },
+	fields: Record<string, string>,
+	authed: boolean,
+): Promise<IDataObject> {
+	const boundary = '----stacktree' + randomBytes(12).toString('hex');
+	const CRLF = '\r\n';
+	const chunks: Buffer[] = [];
+	for (const [name, value] of Object.entries(fields)) {
+		chunks.push(
+			Buffer.from(
+				`--${boundary}${CRLF}Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}${value}${CRLF}`,
+			),
+		);
+	}
+	chunks.push(
+		Buffer.from(
+			`--${boundary}${CRLF}Content-Disposition: form-data; name="file"; filename="${file.filename}"${CRLF}Content-Type: ${file.contentType}${CRLF}${CRLF}`,
+		),
+	);
+	chunks.push(file.buffer);
+	chunks.push(Buffer.from(`${CRLF}--${boundary}--${CRLF}`));
+
+	const options: IHttpRequestOptions = {
+		method,
+		url,
+		body: Buffer.concat(chunks),
+		headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+		json: false, // body is raw bytes; parse the JSON response ourselves
+	};
+	const raw = authed
+		? await ctx.helpers.httpRequestWithAuthentication.call(ctx, 'stacktreeApi', options)
+		: await ctx.helpers.httpRequest.call(ctx, options);
+	return typeof raw === 'string' ? (raw ? (JSON.parse(raw) as IDataObject) : {}) : (raw as IDataObject);
+}
 
 // Stacktree publishes the HTML your agents make to a private, unguessable URL.
 // This node mirrors the API surface the MCP server exposes (packages/mcp-server):
@@ -421,7 +468,6 @@ export class Stacktree implements INodeType {
 		} catch {
 			// No credential configured, anonymous publish only.
 		}
-		const authHeaders: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
 
 		const requireAuth = (operation: string, itemIndex: number) => {
 			if (!apiKey) {
@@ -459,46 +505,33 @@ export class Stacktree implements INodeType {
 						const contentType = fileName.toLowerCase().endsWith('.zip')
 							? 'application/zip'
 							: 'text/html';
-						const formData: IDataObject = {
-							file: { value: buffer, options: { filename: fileName, contentType } },
-						};
+						const file = { filename: fileName, contentType, buffer };
 
 						if (operation === 'publish') {
 							const opts = this.getNodeParameter('publishOptions', i) as IDataObject;
-							if (opts.password) formData.password = opts.password as string;
-							if (opts.publicSlug) formData.public_slug = opts.publicSlug as string;
-							if (opts.expiresInHours) formData.expires_in_hours = String(opts.expiresInHours);
-							if (opts.burnAfterRead) formData.burn_after_read = 'true';
-							if (opts.agentation) formData.agentation = 'true';
-							if (opts.piiCheck) formData.pii_check = opts.piiCheck as string;
-
-							// n8n's modern httpRequest helper does not reliably build multipart
-							// bodies, so publish/update use the legacy request helper (the same
-							// choice shipstatic's node made). Publishing is the one operation that
-							// also works anonymously, so auth is added manually rather than via
-							// the credential's authenticate block.
-							// eslint-disable-next-line @n8n/community-nodes/no-deprecated-workflow-functions -- multipart FormData
-							responseData = await this.helpers.request({
-								method: 'POST',
-								url: `${baseUrl}/sites`,
-								formData,
-								headers: authHeaders,
-								json: true,
-							});
+							const fields: Record<string, string> = {};
+							if (opts.password) fields.password = opts.password as string;
+							if (opts.publicSlug) fields.public_slug = opts.publicSlug as string;
+							if (opts.expiresInHours) fields.expires_in_hours = String(opts.expiresInHours);
+							if (opts.burnAfterRead) fields.burn_after_read = 'true';
+							if (opts.agentation) fields.agentation = 'true';
+							if (opts.piiCheck) fields.pii_check = opts.piiCheck as string;
+							// Authenticated when a key is present (owned, permanent), anonymous otherwise.
+							responseData = await multipartRequest(this, 'POST', `${baseUrl}/sites`, file, fields, !!apiKey);
 						} else {
 							requireAuth('Update', i);
 							const idOrSlug = this.getNodeParameter('idOrSlug', i) as string;
 							const opts = this.getNodeParameter('updateOptions', i) as IDataObject;
-							if (opts.piiCheck) formData.pii_check = opts.piiCheck as string;
-
-							// eslint-disable-next-line @n8n/community-nodes/no-deprecated-workflow-functions -- multipart FormData
-							responseData = await this.helpers.request({
-								method: 'PUT',
-								url: `${baseUrl}/sites/${encodeURIComponent(idOrSlug)}`,
-								formData,
-								headers: authHeaders,
-								json: true,
-							});
+							const fields: Record<string, string> = {};
+							if (opts.piiCheck) fields.pii_check = opts.piiCheck as string;
+							responseData = await multipartRequest(
+								this,
+								'PUT',
+								`${baseUrl}/sites/${encodeURIComponent(idOrSlug)}`,
+								file,
+								fields,
+								true,
+							);
 						}
 					} else if (operation === 'get') {
 						requireAuth('Get', i);
@@ -607,11 +640,10 @@ export class Stacktree implements INodeType {
 					returnData.push({ json: { error: (error as Error).message }, pairedItem: { item: i } });
 					continue;
 				}
-				// Our own validation errors are already node-native; wrap only raw
-				// transport/HTTP errors so the UI shows a clean message.
-				if (error instanceof NodeOperationError || error instanceof NodeApiError) {
-					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- already node-native
-					throw error;
+				// Re-raise our own validation errors with their message intact; wrap
+				// anything else (transport / HTTP) as a node API error.
+				if (error instanceof NodeOperationError) {
+					throw new NodeOperationError(this.getNode(), error.message, { itemIndex: i });
 				}
 				throw new NodeApiError(this.getNode(), error as JsonObject, { itemIndex: i });
 			}

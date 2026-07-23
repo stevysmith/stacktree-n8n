@@ -11,8 +11,8 @@
     "noUnusedLocals": true,
     "noImplicitReturns": true,
     "outDir": "dist",
-    "declaration": true,
-    "sourceMap": true
+    "declaration": false,
+    "sourceMap": false
   },
   "include": ["credentials/**/*.ts", "nodes/**/*.ts"],
   "exclude": ["node_modules", "dist"]
