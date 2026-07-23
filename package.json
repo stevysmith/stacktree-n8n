@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-stacktree",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Publish agent-made HTML to a private, unguessable URL. Gate it with a password or email domain, expire or burn it, and read the feedback viewers leave.",
   "keywords": [
     "n8n-community-node-package",
