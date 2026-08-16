@@ -58,11 +58,18 @@ async function multipartRequest(
 }
 
 // Stacktree publishes the HTML your agents make to a private, unguessable URL.
-// This node mirrors the API surface the MCP server exposes (packages/mcp-server):
-// publish/update/get/list/delete a site, set its gating and lifetime, and read +
+// This node covers the API surface the MCP server exposes
+// (packages/mcp-server): publish/update/get/list/delete a site, set its gating
+// and lifetime, file it under a client space, manage those spaces, and read +
 // resolve the on-page feedback viewers leave. Publishing works without a
-// credential (anonymous, 24h link, returns a claim token); every other operation
-// needs an API key.
+// credential (anonymous, 24h link, returns a claim token); every other
+// operation needs an API key.
+//
+// Plan ceilings are enforced server-side (2026-08-13 tier restructure): a free
+// account gets 3 pages in total with a 7-day life each and no passcode or email
+// gate, and hits HTTP 402 with a plan_* code past that. Field descriptions here
+// say so plainly rather than promising something the API will refuse — but they
+// stay factual, no pitch: an n8n parameter hint is not an upgrade prompt.
 
 // Every JSON operation is authenticated, so it goes through
 // httpRequestWithAuthentication: the credential's Bearer header is injected by
@@ -109,10 +116,56 @@ export class Stacktree implements INodeType {
 				type: 'options',
 				noDataExpression: true,
 				options: [
-					{ name: 'Site', value: 'site' },
+					{ name: 'Client Space', value: 'clientSpace' },
 					{ name: 'Feedback', value: 'feedback' },
+					{ name: 'Site', value: 'site' },
 				],
 				default: 'site',
+			},
+
+			// ----- Client Space operations (alphabetized by name) ---------------
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: { show: { resource: ['clientSpace'] } },
+				options: [
+					{
+						name: 'Create',
+						value: 'create',
+						action: 'Create a client space',
+						description:
+							'Set a client up before any work is published for them. Rarely needed: publishing with a Client Space creates it automatically.',
+					},
+					{
+						name: 'Delete',
+						value: 'delete',
+						action: 'Delete a client space',
+						description:
+							'Delete the space. Its pages are not deleted: they detach to floating pages and keep their URLs. The space-wide passcode or email gate goes with it, so any page that carried no gate of its own becomes reachable by anyone holding its link; set a passcode on those pages first. When a client is simply finished, prefer Update with Archived instead: everything keeps serving, the plan slot is freed, and it can be undone.',
+					},
+					{
+						name: 'Get',
+						value: 'get',
+						action: 'Get a client space',
+						description: 'Fetch one space with its pages, portal state, and connected address',
+					},
+					{
+						name: 'List',
+						value: 'list',
+						action: 'Get many client spaces',
+						description: 'List every client space on the account, most recently active first',
+					},
+					{
+						name: 'Update',
+						value: 'update',
+						action: 'Update a client space',
+						description:
+							'Rename, archive or unarchive, or set the viewer gate covering every page in the space',
+					},
+				],
+				default: 'list',
 			},
 
 			// ----- Site operations (alphabetized by name) -----------------------
@@ -193,7 +246,104 @@ export class Stacktree implements INodeType {
 				default: 'list',
 			},
 
-			// ----- Site ID or Slug (shared) -------------------------------------
+			// ----- Client Space: identity + create -----------------------------
+			{
+				displayName: 'Space ID or Slug',
+				name: 'spaceIdOrSlug',
+				type: 'string',
+				default: '',
+				required: true,
+				placeholder: 'acme-co',
+				description: 'Space ID or slug from the List operation. Not the display name.',
+				displayOptions: {
+					show: { resource: ['clientSpace'], operation: ['get', 'update', 'delete'] },
+				},
+			},
+			{
+				displayName: 'Name',
+				name: 'spaceName',
+				type: 'string',
+				default: '',
+				required: true,
+				placeholder: 'Acme Co',
+				displayOptions: { show: { resource: ['clientSpace'], operation: ['create'] } },
+				description:
+					'Display name for the client space. Casing is kept for display but identity is case-insensitive, so a space that already answers to this name comes back instead of a duplicate.',
+			},
+
+			// ----- Client Space: Update fields (alphabetized by displayName) ---
+			{
+				displayName: 'Update Fields',
+				name: 'spaceSettings',
+				type: 'collection',
+				placeholder: 'Add field',
+				default: {},
+				displayOptions: { show: { resource: ['clientSpace'], operation: ['update'] } },
+				description: 'Only the fields you add are changed. Leave a field out to keep it as is.',
+				options: [
+					{
+						displayName: 'Archived',
+						name: 'archived',
+						type: 'boolean',
+						default: false,
+						description:
+							'Whether the space is archived. Everything keeps serving (pages, portal, connected address) and the plan slot is freed. Unarchiving takes a slot back and returns 402 when the plan is full.',
+					},
+					{
+						displayName: 'Clear Email Gate',
+						name: 'clearEmailGate',
+						type: 'boolean',
+						default: false,
+						description: 'Whether to remove the space-wide email-domain gate',
+					},
+					{
+						displayName: 'Clear Passcode',
+						name: 'clearPassword',
+						type: 'boolean',
+						default: false,
+						description: 'Whether to remove the space-wide passcode',
+					},
+					{
+						displayName: 'Email Domain Gate',
+						name: 'allowedEmailDomain',
+						type: 'string',
+						default: '',
+						placeholder: 'acme.com',
+						description:
+							'Restrict every page in the space to viewers who prove they own an address at this domain, via a one-time magic link. Strict-equal match, subdomains are not covered. Paid plans only; a free account gets a 402 plan_viewer_gate_not_available.',
+					},
+					{
+						displayName: 'Name',
+						name: 'name',
+						type: 'string',
+						default: '',
+						description:
+							'New display name. The slug is a permanent addressing contract and never moves. A 409 name_taken means another active space already answers to that name.',
+					},
+					{
+						displayName: 'Passcode',
+						name: 'password',
+						type: 'string',
+						typeOptions: { password: true },
+						default: '',
+						description:
+							'One passcode that opens every page in the space, entered once by the client with no account. A page carrying its own passcode keeps it. Paid plans only; a free account gets a 402 plan_password_not_available.',
+					},
+				],
+			},
+
+			// ----- Site ID or Slug (one property per resource) ------------------
+			// Two properties rather than one with a `hide`. n8n ORs the keys inside
+			// a hide block ("Any of the defined hide rules have to match" —
+			// node-helpers.js displayParameter returns on the first match), so
+			// `hide: { resource: ['site'], operation: ['list'] }` fires on
+			// resource === 'site' ALONE. That hid the field for every combination
+			// the show block allowed, leaving Site Get/Get Content/Update/Set
+			// Options/Delete and Feedback List with nowhere to type the id — and
+			// a non-displayed parameter is stripped from the saved node, so
+			// execute() then threw rather than merely defaulting. The intended
+			// condition ("site AND not list, OR feedback AND list") cannot be
+			// expressed in a single property: show is AND across keys.
 			{
 				displayName: 'Site ID or Slug',
 				name: 'idOrSlug',
@@ -204,14 +354,59 @@ export class Stacktree implements INodeType {
 				description: 'Site ID, public slug, or unlisted token',
 				displayOptions: {
 					show: {
-						resource: ['site', 'feedback'],
-						operation: ['update', 'set', 'get', 'getContent', 'delete', 'list'],
-					},
-					hide: {
 						resource: ['site'],
-						operation: ['list'],
+						operation: ['update', 'set', 'get', 'getContent', 'delete'],
 					},
 				},
+			},
+			{
+				displayName: 'Site ID or Slug',
+				name: 'idOrSlug',
+				type: 'string',
+				default: '',
+				required: true,
+				placeholder: 'q3-report or the unlisted token',
+				description: 'Site ID, public slug, or unlisted token',
+				displayOptions: { show: { resource: ['feedback'], operation: ['list'] } },
+			},
+
+			// ----- Site: List paging + filter -----------------------------------
+			{
+				displayName: 'Return All',
+				name: 'returnAll',
+				type: 'boolean',
+				default: false,
+				displayOptions: { show: { resource: ['site'], operation: ['list'] } },
+				description: 'Whether to return all results or only up to a given limit',
+			},
+			{
+				displayName: 'Limit',
+				name: 'limit',
+				type: 'number',
+				typeOptions: { minValue: 1 },
+				default: 50,
+				displayOptions: {
+					show: { resource: ['site'], operation: ['list'], returnAll: [false] },
+				},
+				description: 'Max number of results to return',
+			},
+			{
+				displayName: 'Filters',
+				name: 'listFilters',
+				type: 'collection',
+				placeholder: 'Add filter',
+				default: {},
+				displayOptions: { show: { resource: ['site'], operation: ['list'] } },
+				options: [
+					{
+						displayName: 'Client Space',
+						name: 'client',
+						type: 'string',
+						default: '',
+						placeholder: 'Acme Co',
+						description: 'Only return pages filed under this client space, by name or slug',
+					},
+				],
 			},
 
 			// ----- Content source (publish + update) ----------------------------
@@ -278,13 +473,22 @@ export class Stacktree implements INodeType {
 						description: 'Whether to delete the page automatically after the first view',
 					},
 					{
+						displayName: 'Client Space',
+						name: 'client',
+						type: 'string',
+						default: '',
+						placeholder: 'Acme Co',
+						description:
+							'Client space to file this page under, by name or slug. Auto-created if it does not exist. Leave empty for a floating page. Requires an API key credential; ignored on anonymous publishes.',
+					},
+					{
 						displayName: 'Expiry (Hours)',
 						name: 'expiresInHours',
 						type: 'string',
 						default: '',
 						placeholder: '168, or "never"',
 						description:
-							'Lifetime in hours, or "never" for a permanent link (requires an API key). Empty uses the server default.',
+							'Lifetime in hours, or "never" for a permanent link. Clamped to the account ceiling rather than refused: anonymous caps at 24 hours, a free account at 7 days (168), paid plans have no ceiling. Empty uses the server default. Check expires_at on the output for what the page got.',
 					},
 					{
 						displayName: 'Feedback Toolbar (Agentation)',
@@ -300,7 +504,8 @@ export class Stacktree implements INodeType {
 						type: 'string',
 						typeOptions: { password: true },
 						default: '',
-						description: 'Gate the page behind a password',
+						description:
+							'Gate the page behind a passcode. Anonymous publishes and paid plans only; a free account gets a 402 plan_password_not_available.',
 					},
 					{
 						displayName: 'PII Scan',
@@ -375,13 +580,30 @@ export class Stacktree implements INodeType {
 						description: 'Whether to remove the password gate',
 					},
 					{
+						displayName: 'Client Space',
+						name: 'client',
+						type: 'string',
+						default: '',
+						placeholder: 'Acme Co',
+						description:
+							'File this page under a client space, by name or slug. Auto-created if it does not exist. Filing is free on every plan.',
+					},
+					{
+						displayName: 'Detach From Client Space',
+						name: 'detachClient',
+						type: 'boolean',
+						default: false,
+						description:
+							'Whether to unfile this page from its client space and return it to a floating page. The page keeps its URL.',
+					},
+					{
 						displayName: 'Email Domain Gate',
 						name: 'allowedEmailDomain',
 						type: 'string',
 						default: '',
 						placeholder: 'acme.com',
 						description:
-							'Restrict viewing to a company email domain (viewers verify via a magic link)',
+							'Restrict viewing to a company email domain (viewers verify via a magic link). Paid plans only; a free account gets a 402 plan_viewer_gate_not_available.',
 					},
 					{
 						displayName: 'Expiry (Hours)',
@@ -389,7 +611,8 @@ export class Stacktree implements INodeType {
 						type: 'string',
 						default: '',
 						placeholder: '168, or "never"',
-						description: 'New lifetime in hours, or "never"',
+						description:
+							'New lifetime in hours, or "never". Clamped to the account ceiling: a free account caps at 7 days (168), paid plans have no ceiling.',
 					},
 					{
 						displayName: 'Feedback Toolbar (Agentation)',
@@ -404,7 +627,8 @@ export class Stacktree implements INodeType {
 						type: 'string',
 						typeOptions: { password: true },
 						default: '',
-						description: 'Set a password on the site',
+						description:
+							'Set a passcode on the site. Paid plans only; a free account gets a 402 plan_password_not_available.',
 					},
 					{
 						displayName: 'Public Slug',
@@ -512,11 +736,13 @@ export class Stacktree implements INodeType {
 							const fields: Record<string, string> = {};
 							if (opts.password) fields.password = opts.password as string;
 							if (opts.publicSlug) fields.public_slug = opts.publicSlug as string;
+							if (opts.client) fields.client = opts.client as string;
 							if (opts.expiresInHours) fields.expires_in_hours = String(opts.expiresInHours);
 							if (opts.burnAfterRead) fields.burn_after_read = 'true';
 							if (opts.agentation) fields.agentation = 'true';
 							if (opts.piiCheck) fields.pii_check = opts.piiCheck as string;
-							// Authenticated when a key is present (owned, permanent), anonymous otherwise.
+							// Authenticated when a key is present (owned, and permanent on a paid
+							// plan), anonymous otherwise (24h link + a claim_token).
 							responseData = await multipartRequest(this, 'POST', `${baseUrl}/sites`, file, fields, !!apiKey);
 						} else {
 							requireAuth('Update', i);
@@ -553,7 +779,43 @@ export class Stacktree implements INodeType {
 						responseData = { id_or_slug: idOrSlug, html };
 					} else if (operation === 'list') {
 						requireAuth('List', i);
-						responseData = (await authedRequest(this, 'GET', `${baseUrl}/sites`)) as IDataObject[];
+						const returnAll = this.getNodeParameter('returnAll', i, false) as boolean;
+						const limit = returnAll ? Infinity : (this.getNodeParameter('limit', i, 50) as number);
+						const filters = this.getNodeParameter('listFilters', i, {}) as IDataObject;
+						// Keyset pagination, not offset: the cursor is (updated_at, id), so a
+						// page republished mid-scroll cannot make a row repeat or vanish.
+						// The API caps a single request at 500.
+						const sites: IDataObject[] = [];
+						let before: number | null = null;
+						let beforeId: string | null = null;
+						for (;;) {
+							const qs = new URLSearchParams();
+							if (filters.client) qs.set('client', String(filters.client));
+							qs.set('limit', String(Math.min(returnAll ? 200 : limit - sites.length, 500)));
+							if (before !== null) qs.set('before', String(before));
+							if (beforeId !== null) qs.set('before_id', beforeId);
+							const page = (await authedRequest(
+								this,
+								'GET',
+								`${baseUrl}/sites?${qs.toString()}`,
+							)) as IDataObject;
+							const batch = (page.sites as IDataObject[] | undefined) ?? [];
+							sites.push(...batch);
+							if (sites.length >= limit) {
+								sites.length = limit;
+								break;
+							}
+							// An empty batch also stops the loop: without it a server that
+							// reported has_more with no rows would spin forever.
+							if (!page.has_more || batch.length === 0) break;
+							before = (page.next_before as number | null) ?? null;
+							beforeId = (page.next_before_id as string | null) ?? null;
+							if (before === null && beforeId === null) break;
+						}
+						// One item per site. The API answers with an envelope
+						// ({ sites, has_more, ... }); emitting that verbatim made every
+						// downstream node need a Split Out (changed in 0.2.0).
+						responseData = sites;
 					} else if (operation === 'delete') {
 						requireAuth('Delete', i);
 						const idOrSlug = this.getNodeParameter('idOrSlug', i) as string;
@@ -581,6 +843,11 @@ export class Stacktree implements INodeType {
 						if (settings.unpublish) body.public_slug = null;
 						else if (settings.publicSlug) body.public_slug = settings.publicSlug;
 
+						// Detach wins over a name, same shape as the clear/set pairs above:
+						// null is the API's explicit "unfile this page".
+						if (settings.detachClient) body.client = null;
+						else if (settings.client) body.client = settings.client;
+
 						if (settings.agentation !== undefined) body.agentation = settings.agentation as boolean;
 						if (settings.title) body.title = settings.title;
 
@@ -598,6 +865,69 @@ export class Stacktree implements INodeType {
 						)) as IDataObject;
 					} else {
 						throw new NodeOperationError(this.getNode(), `Unknown site operation: ${operation}`, {
+							itemIndex: i,
+						});
+					}
+				} else if (resource === 'clientSpace') {
+					const SPACE_OP_LABEL: Record<string, string> = {
+						create: 'Create Client Space',
+						delete: 'Delete Client Space',
+						get: 'Get Client Space',
+						list: 'List Client Spaces',
+						update: 'Update Client Space',
+					};
+					requireAuth(SPACE_OP_LABEL[operation] ?? operation, i);
+					if (operation === 'list') {
+						const res = (await authedRequest(this, 'GET', `${baseUrl}/spaces`)) as IDataObject;
+						// One item per space. Pre-migration deployments answer { spaces: [] }
+						// rather than erroring, so an empty array here is the day-one state.
+						responseData = (res.spaces as IDataObject[] | undefined) ?? [];
+					} else if (operation === 'get') {
+						const idOrSlug = this.getNodeParameter('spaceIdOrSlug', i) as string;
+						responseData = (await authedRequest(
+							this,
+							'GET',
+							`${baseUrl}/spaces/${encodeURIComponent(idOrSlug)}`,
+						)) as IDataObject;
+					} else if (operation === 'create') {
+						const name = this.getNodeParameter('spaceName', i) as string;
+						responseData = (await authedRequest(this, 'POST', `${baseUrl}/spaces`, {
+							body: { name },
+						})) as IDataObject;
+					} else if (operation === 'update') {
+						const idOrSlug = this.getNodeParameter('spaceIdOrSlug', i) as string;
+						const settings = this.getNodeParameter('spaceSettings', i) as IDataObject;
+						const body: IDataObject = {};
+
+						if (settings.clearPassword) body.password = null;
+						else if (settings.password) body.password = settings.password;
+
+						if (settings.clearEmailGate) body.allowed_email_domain = null;
+						else if (settings.allowedEmailDomain) body.allowed_email_domain = settings.allowedEmailDomain;
+
+						if (settings.name) body.name = settings.name;
+						if (settings.archived !== undefined) body.archived = settings.archived as boolean;
+
+						if (Object.keys(body).length === 0) {
+							throw new NodeOperationError(this.getNode(), 'Add at least one field to change.', {
+								itemIndex: i,
+							});
+						}
+						responseData = (await authedRequest(
+							this,
+							'PATCH',
+							`${baseUrl}/spaces/${encodeURIComponent(idOrSlug)}`,
+							{ body },
+						)) as IDataObject;
+					} else if (operation === 'delete') {
+						const idOrSlug = this.getNodeParameter('spaceIdOrSlug', i) as string;
+						responseData = (await authedRequest(
+							this,
+							'DELETE',
+							`${baseUrl}/spaces/${encodeURIComponent(idOrSlug)}`,
+						)) as IDataObject;
+					} else {
+						throw new NodeOperationError(this.getNode(), `Unknown client space operation: ${operation}`, {
 							itemIndex: i,
 						});
 					}

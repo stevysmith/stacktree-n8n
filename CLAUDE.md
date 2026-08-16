@@ -5,9 +5,12 @@ Context for working on the Stacktree n8n community node.
 ## What this is
 
 An n8n community node that publishes agent-made HTML to a private stacktr.ee URL
-and manages it (gate, expire, burn, read/resolve viewer feedback). Mirrors the
-operation set of the Stacktree MCP server. Registered for n8n AI Agent workflows
-via `usableAsTool: true`.
+and manages it (gate, expire, burn, file under a client space, read/resolve
+viewer feedback). Covers the operation set of the Stacktree MCP server, client
+spaces included: filing at publish time and via Site > Set Options (`client`, or
+Detach to send `null`), the full Client Space resource against `/spaces`, and a
+client-filtered Site > List. Registered for n8n AI Agent workflows via
+`usableAsTool: true`.
 
 ## Source of truth
 
@@ -18,8 +21,10 @@ for the public GitHub presence and the npm `repository` link. Same pattern as
 
 ## Layout
 
-- `nodes/Stacktree/Stacktree.node.ts` — the node. Two resources (Site, Feedback),
-  nine operations. Icon: `stacktree.svg` (same file also in `credentials/`).
+- `nodes/Stacktree/Stacktree.node.ts` — the node. Three resources (Client Space,
+  Feedback, Site), fourteen operations. Client Space is create/delete/get/list/
+  update against `/spaces`, keyed by `spaceIdOrSlug` (id or slug, never the
+  display name). Icon: `stacktree.svg` (same file also in `credentials/`).
 - `credentials/StacktreeApi.credentials.ts` — optional API-key credential
   (Bearer), with a `GET /sites` credential test.
 - Built with `@n8n/node-cli` (`n8n-node build|dev|lint`).
@@ -70,6 +75,20 @@ submission is blocked. Publish through `.github/workflows/publish.yml` instead:
 - **Credential is optional.** Publishing works anonymously (24h link + a
   `claim_token` in the response). All other operations call `requireAuth` and
   error clearly without a key.
+- **`displayOptions.hide` is OR across its keys, `show` is AND.** n8n's
+  `displayParameter` (node-helpers.js) returns on the FIRST matching hide key:
+  "Any of the defined hide rules have to match to hide the parameter". A single
+  property with `hide: { resource: ['site'], operation: ['list'] }` therefore
+  hides on `resource === 'site'` alone. That shipped in 0.1.2 and made the
+  "Site ID or Slug" field render on NO screen, breaking six operations — and
+  because a non-displayed parameter is stripped from the saved node, execute()
+  threw rather than defaulting. A condition of the form "(A and not B) or
+  (C and B)" needs two properties sharing one `name`, each with its own `show`.
+  Neither tsc nor the lint rules can see this: `displayOptions` is inert data.
+  Verify visibility by driving n8n's own resolver over the COMPILED node —
+  `require('n8n-workflow/dist/cjs/node-helpers.js').displayParameter` — for every
+  resource/operation pair. A mock-`getNodeParameter` test cannot catch it,
+  because that stub bypasses display resolution entirely.
 - **`NodeConnectionTypes` (plural)** is the runtime value in current n8n-workflow;
   `NodeConnectionType` (singular) is type-only and is `undefined` at runtime.
   Using the singular as a value crashes the node at load.

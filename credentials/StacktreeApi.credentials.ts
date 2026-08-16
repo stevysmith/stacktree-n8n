@@ -24,7 +24,7 @@ export class StacktreeApi implements ICredentialType {
 			default: '',
 			required: true,
 			description:
-				'Your Stacktree API key. Create one in the dashboard at app.stacktr.ee. Publishing works without a key (anonymous links expire in 24 hours and return a claim token); a key makes links permanent and unlocks update, delete, list, gating, and the feedback loop.',
+				'Your Stacktree API key. Create one in the dashboard at app.stacktr.ee. Publishing works without a key (anonymous links expire in 24 hours and return a claim token); a key adds update, delete, list and the feedback loop. Free keys cap at 3 pages total with a 7-day expiry; passcodes, email gates and permanent links start on a paid plan.',
 		},
 		{
 			displayName: 'Base URL',
