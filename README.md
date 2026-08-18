@@ -4,6 +4,18 @@ An [n8n](https://n8n.io) community node for [Stacktree](https://stacktr.ee) — 
 
 Works as a regular workflow node and as a tool inside n8n AI Agent workflows (`usableAsTool`).
 
+## Set up with an agent
+
+If you have a coding agent open, hand it this line and it does the rest —
+installs, verifies the connection, and learns the tool surface:
+
+```
+Fetch and follow the setup instructions at https://stacktr.ee/prompt.md
+```
+
+Works in any agent that can fetch a URL. The instructions are plain Markdown;
+read them first if you like.
+
 ## Why this over a generic static host
 
 Stacktree is private by default and built for agent-made deliverables:
